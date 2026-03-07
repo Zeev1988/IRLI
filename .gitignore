@@ -1,0 +1,39 @@
+# Environment and secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+.npm
+.yarn/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+*.tmp
+.cache/
