@@ -17,6 +17,8 @@ from openai import AsyncOpenAI
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from sqlalchemy import select
+
 from app.config import DEBUG_MODE
 from app.db.database import AsyncSessionLocal
 from app.db.models import LabProfileORM
@@ -41,6 +43,38 @@ def _get_embed_client() -> AsyncOpenAI:
     if _embed_client is None:
         _embed_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
     return _embed_client
+
+
+def _embedding_content(profile: LabProfile) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Content used for embedding — used to detect changes."""
+    return (
+        tuple(profile.research_summary),
+        tuple(profile.keywords),
+        tuple(profile.technologies),
+    )
+
+
+async def _get_existing_embedding_if_unchanged(
+    lab_url: str, profile: LabProfile
+) -> list[float] | None:
+    """Return existing embedding if profile content is unchanged; else None."""
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                select(
+                    LabProfileORM.embedding,
+                    LabProfileORM.research_summary,
+                    LabProfileORM.keywords,
+                    LabProfileORM.technologies,
+                ).where(LabProfileORM.lab_url == lab_url)
+            )
+        ).first()
+    if not row or row.embedding is None:
+        return None
+    existing = (tuple(row.research_summary or []), tuple(row.keywords or []), tuple(row.technologies or []))
+    if existing != _embedding_content(profile):
+        return None
+    return row.embedding
 
 
 async def _embed(profile: LabProfile) -> list[float] | None:
@@ -125,7 +159,11 @@ async def upsert_profile(
     generate_embedding: bool = True,
 ) -> None:
     """Upsert a single lab profile (e.g. from debug stub)."""
-    embedding = await _embed(profile) if generate_embedding else None
+    if generate_embedding:
+        existing = await _get_existing_embedding_if_unchanged(str(profile.lab_url), profile)
+        embedding = existing if existing is not None else await _embed(profile)
+    else:
+        embedding = None
     await _upsert(profile, embedding, metrics=metrics)
 
 
@@ -133,13 +171,14 @@ async def upsert_profile(
 # Per-lab processing
 # ---------------------------------------------------------------------------
 async def _process_lab(url: str, semaphore: asyncio.Semaphore) -> bool:
-    """Crawl, extract, embed, and upsert a single lab. Returns True on success."""
+    """Crawl, extract, embed (only if content changed), and upsert a single lab."""
     async with semaphore:
         try:
             logger.info("Processing lab: %s", url)
             markdown = await crawl_lab_with_nested(url)
             profile = await extract_lab_data(markdown, url)
-            embedding = await _embed(profile)
+            existing = await _get_existing_embedding_if_unchanged(str(profile.lab_url), profile)
+            embedding = existing if existing is not None else await _embed(profile)
             await _upsert(profile, embedding)
             logger.info("Upserted: %s (%s)", profile.pi_name, url)
             return True

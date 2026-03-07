@@ -4,11 +4,37 @@ Link extraction and rule-based pre-filtering for faculty index pages.
 Extracts all links from markdown, then applies heuristics to drop obvious
 non-lab links (nav, footer, assets, social) before sending the remainder
 to the LLM for classification.
+
+Optional LAB_PATH_PATTERNS (comma-separated regex) further reduces candidates
+by keeping only URLs whose path matches at least one pattern (e.g. /~username,
+/labs/view/, /people/). Reduces LLM token cost for large index pages.
 """
+import os
 import re
 from urllib.parse import urljoin, urlparse
 
 logger = __import__("logging").getLogger(__name__)
+
+# Optional: regex patterns for lab-like URL paths. If set, only URLs matching
+# at least one pattern pass through. E.g. "~[^/]+$,/people/,/labs/view"
+_LAB_PATH_PATTERNS: list[re.Pattern[str]] | None = None
+
+
+def _get_lab_path_patterns() -> list[re.Pattern[str]] | None:
+    global _LAB_PATH_PATTERNS
+    if _LAB_PATH_PATTERNS is not None:
+        return _LAB_PATH_PATTERNS
+    raw = os.getenv("LAB_PATH_PATTERNS", "").strip()
+    if not raw:
+        _LAB_PATH_PATTERNS = []
+        return None
+    try:
+        _LAB_PATH_PATTERNS = [re.compile(p.strip()) for p in raw.split(",") if p.strip()]
+        return _LAB_PATH_PATTERNS if _LAB_PATH_PATTERNS else None
+    except re.error:
+        logger.warning("Invalid LAB_PATH_PATTERNS, ignoring")
+        _LAB_PATH_PATTERNS = []
+        return None
 
 # ---------------------------------------------------------------------------
 # Extraction
@@ -82,11 +108,14 @@ def prefilter_lab_candidates(
     Rule-based pre-filter to drop obvious non-lab links before LLM classification.
 
     Removes: assets (.jpg, .css, etc.), nav/footer text patterns, social domains,
-    and common non-lab path segments.
+    and common non-lab path segments. When LAB_PATH_PATTERNS is set, only URLs
+    whose path matches at least one pattern are kept.
     """
     filtered: list[tuple[str, str]] = []
     for text, url in candidates:
         if _is_obvious_non_lab(text, url):
+            continue
+        if not _matches_lab_path_patterns(url):
             continue
         filtered.append((text, url))
     if len(filtered) < len(candidates):
@@ -95,6 +124,16 @@ def prefilter_lab_candidates(
             len(candidates), len(filtered), len(candidates) - len(filtered),
         )
     return filtered
+
+
+def _matches_lab_path_patterns(url: str) -> bool:
+    """If LAB_PATH_PATTERNS is set, return True only when path matches. Else True."""
+    patterns = _get_lab_path_patterns()
+    if not patterns:
+        return True
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    return any(p.search(path) for p in patterns)
 
 
 def _is_obvious_non_lab(text: str, url: str) -> bool:

@@ -22,6 +22,8 @@ dependencies = [
     "pgvector>=0.3",
     "apscheduler>=3.10",
     "tenacity>=8.2.0",
+    "arq>=0.27",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]

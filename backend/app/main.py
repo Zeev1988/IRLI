@@ -3,13 +3,19 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
+from app.api import jobs as _jobs_module
+from app.api import labs as _labs_module
 from app.api.routes import router
+from app.db.database import engine
+from app.jobs import close_redis_pool, get_redis_pool, use_queue
+from app.services.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,13 +28,24 @@ _DB_AVAILABLE = bool(os.getenv("DATABASE_URL"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if _DB_AVAILABLE:
-        from app.api import labs as _labs_module  # registers the router
-        from app.services.scheduler import start_scheduler, stop_scheduler
+        @retry(
+            retry=retry_if_exception_type(Exception),
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=1, min=1, max=30),
+        )
+        async def _ensure_db_ready() -> None:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+
+        await _ensure_db_ready()
         app.include_router(_labs_module.router)
+        app.include_router(_jobs_module.router)
+        if use_queue():
+            await get_redis_pool()
         start_scheduler()
     yield
     if _DB_AVAILABLE:
-        from app.services.scheduler import stop_scheduler
+        await close_redis_pool()
         stop_scheduler()
 
 

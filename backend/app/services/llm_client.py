@@ -7,6 +7,10 @@ Only configured when DEBUG_MODE is false.
 import os
 from typing import Any
 
+import google.generativeai as genai
+import instructor
+from openai import AsyncOpenAI
+
 from app.config import DEBUG_MODE
 
 _PROVIDER: str = "debug"
@@ -23,10 +27,6 @@ def _init_client() -> None:
         _MODEL = "stub"
         _client = None
         return
-
-    import instructor
-    from openai import AsyncOpenAI
-    import google.generativeai as genai
 
     _PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
 

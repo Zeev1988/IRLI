@@ -16,9 +16,12 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from fastapi.responses import JSONResponse
+
 from app.config import DEBUG_MODE
 from app.db.database import get_session
 from app.db.models import LabProfileORM
+from app.jobs import enqueue_enrich, enqueue_ingest, use_queue
 from app.services.ingestion import ingest_faculty
 from app.services.metrics_enricher import enrich_all_labs
 
@@ -120,7 +123,7 @@ def _order_by_clause(sort_by: str | None, sort_order: str):
     summary="List or search labs",
     description=(
         "Without `q`: returns labs (default: by last_crawled_at). "
-        "With `q`: performs pgvector cosine similarity search. "
+        "With `q`: hybrid search (pgvector similarity + full-text ts_rank). "
         "Filter by institution, faculty, keyword, or min metrics. "
         "Sort by publication_count, citation_count, or h_index."
     ),
@@ -169,16 +172,12 @@ async def list_labs(
 
         query_vec = await _embed_query(q)
         vec_literal = f"[{','.join(str(x) for x in query_vec)}]"
-        q_pat = f"%{q.strip()}%"
+        q_clean = q.strip()
 
-        # Semantic search with filters. Match q in keywords, technologies, or research_summary
-        # so exact phrases like "machine learning" find labs that list them.
-        filter_sql = """ AND (
-            EXISTS (SELECT 1 FROM unnest(keywords) AS kw WHERE kw ILIKE :q_pat)
-            OR EXISTS (SELECT 1 FROM unnest(technologies) AS t WHERE t ILIKE :q_pat)
-            OR EXISTS (SELECT 1 FROM unnest(research_summary) AS rs WHERE rs ILIKE :q_pat)
-        )"""
-        filter_params: dict[str, Any] = {"vec": vec_literal, "limit": limit, "q_pat": q_pat}
+        # Hybrid search: combine pgvector similarity + PostgreSQL full-text (ts_rank).
+        # Weights: 0.7 semantic, 0.3 keyword (BM25-style via ts_rank).
+        filter_sql = ""
+        filter_params: dict[str, Any] = {"vec": vec_literal, "limit": limit, "q_fts": q_clean}
         if institution and institution.strip():
             filter_sql += " AND institution ILIKE :inst"
             filter_params["inst"] = f"%{institution.strip()}%"
@@ -200,10 +199,20 @@ async def list_labs(
 
         raw = await session.execute(
             text(
-                "SELECT * FROM lab_profiles "
-                "WHERE 1=1 " + filter_sql + " "
-                "ORDER BY (embedding <=> :vec) NULLS LAST "
-                "LIMIT :limit"
+                """
+                WITH q AS (SELECT plainto_tsquery('english', :q_fts) AS query)
+                SELECT lp.* FROM lab_profiles lp
+                CROSS JOIN q
+                WHERE 1=1 """ + filter_sql + """
+                ORDER BY (
+                    0.7 * coalesce(1 - (lp.embedding <=> :vec::vector) / 2, 0)
+                    + 0.3 * coalesce(
+                        ts_rank(lp.search_vector, q.query) / (1 + ts_rank(lp.search_vector, q.query)),
+                        0
+                    )
+                ) DESC NULLS LAST
+                LIMIT :limit
+                """
             ),
             filter_params,
         )
@@ -252,7 +261,14 @@ class IngestRequest(BaseModel):
 )
 async def trigger_enrich(
     limit: int | None = Query(None, ge=1, le=500, description="Max labs to enrich (default: all)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
+    if use_queue():
+        job_id = await enqueue_enrich(limit)
+        if job_id:
+            return JSONResponse(
+                status_code=202,
+                content={"job_id": job_id, "status": "queued", "message": "Enrich job queued"},
+            )
     try:
         result = await enrich_all_labs(limit=limit)
     except Exception as exc:
@@ -271,7 +287,14 @@ async def trigger_enrich(
         "crawls each one, extracts a LabProfile, and upserts it into the DB."
     ),
 )
-async def trigger_ingest(body: IngestRequest) -> dict[str, Any]:
+async def trigger_ingest(body: IngestRequest) -> dict[str, Any] | JSONResponse:
+    if use_queue():
+        job_id = await enqueue_ingest(str(body.url))
+        if job_id:
+            return JSONResponse(
+                status_code=202,
+                content={"job_id": job_id, "status": "queued", "message": "Ingest job queued"},
+            )
     try:
         summary = await ingest_faculty(str(body.url))
     except Exception as exc:

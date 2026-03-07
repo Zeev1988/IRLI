@@ -23,6 +23,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.config import DEBUG_MODE
+from app.db.database import AsyncSessionLocal
+from app.services.ingestion import upsert_profile
+from app.services.metrics_enricher import (
+    enrich_all_labs,
+    enrich_lab_metrics,
+    fetch_author_metrics,
+    search_and_fetch_metrics,
+)
+from debug.stubs import DEBUG_STUB
 
 # Default author ID for --fetch-id (Geoffrey Hinton, well-known researcher)
 DEFAULT_TEST_AUTHOR_ID = "114131011"
@@ -66,8 +75,6 @@ TEMPLATE_PROFILE = {
 
 async def __run_fetch_mode() -> None:
     """Test Semantic Scholar API: search + fetch using template profile."""
-    from app.services.metrics_enricher import search_and_fetch_metrics
-
     print(f"\n{'='*60}")
     print("  IRLI Metrics Enrichment — Semantic Scholar API Test")
     print(f"  DEBUG_MODE : {DEBUG_MODE}")
@@ -88,8 +95,6 @@ async def __run_fetch_mode() -> None:
 
 async def __run_fetch_id_mode(author_id: str) -> None:
     """Test _fetch_author_metrics directly with a Semantic Scholar author ID."""
-    from app.services.metrics_enricher import fetch_author_metrics
-
     print(f"\n{'='*60}")
     print("  IRLI Metrics — fetch_author_metrics Test")
     print(f"  author_id : {author_id}")
@@ -106,10 +111,6 @@ async def __run_fetch_id_mode(author_id: str) -> None:
 
 async def __run_stub_mode() -> None:
     """Enrich extractor DEBUG_STUB profiles and upsert to Supabase."""
-    from debug.stubs import DEBUG_STUB
-    from app.services.ingestion import upsert_profile
-    from app.services.metrics_enricher import search_and_fetch_metrics
-
     print(f"\n{'='*60}")
     print("  IRLI — Enrich & Upsert DEBUG_STUB Profiles")
     print(f"  DEBUG_MODE : {DEBUG_MODE}")
@@ -146,9 +147,6 @@ def __run_template_mode() -> None:
 
 
 async def main() -> None:
-    from app.db.database import AsyncSessionLocal
-    from app.services.metrics_enricher import enrich_all_labs, enrich_lab_metrics
-
     print(f"\n{'='*60}")
     print("  IRLI Metrics Enrichment Runner")
     print(f"  DEBUG_MODE : {DEBUG_MODE}")

@@ -24,15 +24,28 @@ scheduler = AsyncIOScheduler()
 
 
 async def _run_all_faculties() -> None:
+    from app.jobs import enqueue_ingest, use_queue
+
     logger.info(
         "Scheduled ingestion starting — %d faculty URLs queued", len(FACULTY_INDEX_URLS)
     )
-    for url in FACULTY_INDEX_URLS:
-        try:
-            summary = await ingest_faculty(url)
-            logger.info("Ingested %s: %s", url, summary)
-        except Exception:
-            logger.exception("Ingestion failed for %s — continuing", url)
+    if use_queue():
+        for url in FACULTY_INDEX_URLS:
+            try:
+                job_id = await enqueue_ingest(url)
+                if job_id:
+                    logger.info("Queued ingest for %s (job_id=%s)", url, job_id)
+                else:
+                    logger.warning("Failed to queue ingest for %s", url)
+            except Exception:
+                logger.exception("Failed to queue ingest for %s — continuing", url)
+    else:
+        for url in FACULTY_INDEX_URLS:
+            try:
+                summary = await ingest_faculty(url)
+                logger.info("Ingested %s: %s", url, summary)
+            except Exception:
+                logger.exception("Ingestion failed for %s — continuing", url)
     logger.info("Scheduled ingestion complete")
 
 
