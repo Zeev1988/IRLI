@@ -62,8 +62,9 @@ export default async function HomePage({ searchParams }: PageProps) {
   };
   let labs: Awaited<ReturnType<typeof fetchLabs>> = [];
   let error: string | null = null;
+  const limit = q?.trim() ? 20 : 100;
   try {
-    labs = await fetchLabs(filters, 20);
+    labs = await fetchLabs(filters, limit);
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to fetch labs";
   }
