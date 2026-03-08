@@ -50,3 +50,15 @@ class LabProfileORM(Base):
 
     def __repr__(self) -> str:
         return f"<LabProfileORM id={self.id} pi={self.pi_name!r}>"
+
+
+class IngestionLogORM(Base):
+    __tablename__ = "ingestion_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    index_url: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    success_count: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
+    failed_count: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -22,13 +22,16 @@ from app.config import DEBUG_MODE
 
 logger = logging.getLogger(__name__)
 
+_CACHE_ENABLED = os.getenv("CRAWL_CACHE_ENABLED", "true").lower() == "true"
+_CACHE_MODE = CacheMode.ENABLED if _CACHE_ENABLED else CacheMode.BYPASS
+
 _BROWSER_CFG = BrowserConfig(
     headless=True,
     verbose=False,
 )
 
 _BASE_KW = dict(
-    cache_mode=CacheMode.BYPASS,
+    cache_mode=_CACHE_MODE,
     word_count_threshold=5,
     remove_overlay_elements=True,
     exclude_external_links=False,  # Keep cross-subdomain links (e.g. cs.huji.ac.il from cognitive.huji.ac.il)
@@ -46,7 +49,7 @@ _INDEX_CFG = CrawlerRunConfig(
 
 # Lab pages: individual profiles — lighter config
 _LAB_CFG = CrawlerRunConfig(
-    cache_mode=CacheMode.BYPASS,
+    cache_mode=_CACHE_MODE,
     word_count_threshold=0,           # IMPORTANT: Don't skip short blocks
     remove_overlay_elements=True,
     exclude_external_links=False,     # Keep this False

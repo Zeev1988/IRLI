@@ -10,8 +10,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 load_dotenv()
 
-from app.api import jobs as _jobs_module
-from app.api import labs as _labs_module
+        from app.api import ingestion_logs as _ingestion_logs_module
+        from app.api import jobs as _jobs_module
+        from app.api import labs as _labs_module
 from app.api.routes import router
 from app.db.database import engine
 from app.jobs import close_redis_pool, get_redis_pool, use_queue
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
         await _ensure_db_ready()
         app.include_router(_labs_module.router)
         app.include_router(_jobs_module.router)
+        app.include_router(_ingestion_logs_module.router)
         if use_queue():
             await get_redis_pool()
         start_scheduler()

@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from app.config import DEBUG_MODE
 from app.db.database import AsyncSessionLocal
-from app.db.models import LabProfileORM
+from app.db.models import IngestionLogORM, LabProfileORM
 from app.models.lab import LabProfile
 from app.services.discoverer import discover_lab_urls
 from app.services.extractor import extract_lab_data
@@ -195,34 +195,66 @@ async def ingest_faculty(index_url: str) -> dict[str, int]:
     Run the full ingestion pipeline for one faculty index URL.
 
     Returns a summary dict with ``total``, ``success``, and ``failed`` counts.
+    Logs to ingestion_logs for observability.
     """
+    started_at = datetime.now(timezone.utc)
+    log_id: int | None = None
+
+    async with AsyncSessionLocal() as session:
+        log = IngestionLogORM(
+            index_url=index_url,
+            started_at=started_at,
+        )
+        session.add(log)
+        await session.commit()
+        await session.refresh(log)
+        log_id = log.id
+
     logger.info("Starting ingestion for faculty index: %s", index_url)
-    lab_urls = await discover_lab_urls(index_url)
-    logger.info("Found %d lab URLs to process", len(lab_urls))
+    try:
+        lab_urls = await discover_lab_urls(index_url)
+        logger.info("Found %d lab URLs to process", len(lab_urls))
 
-    semaphore = asyncio.Semaphore(_CONCURRENCY_LIMIT)
-    results = await asyncio.gather(
-        *[_process_lab(url, semaphore) for url in lab_urls],
-        return_exceptions=False,
-    )
+        semaphore = asyncio.Semaphore(_CONCURRENCY_LIMIT)
+        results = await asyncio.gather(
+            *[_process_lab(url, semaphore) for url in lab_urls],
+            return_exceptions=False,
+        )
 
-    success = sum(1 for r in results if r)
-    failed = len(results) - success
-    logger.info(
-        "Ingestion complete for %s — %d/%d succeeded", index_url, success, len(results)
-    )
+        success = sum(1 for r in results if r)
+        failed = len(results) - success
+        logger.info(
+            "Ingestion complete for %s — %d/%d succeeded", index_url, success, len(results)
+        )
 
-    # Enrich newly ingested labs (only those without metrics)
-    enrich_result = await enrich_all_labs(only_without_metrics=True)
-    logger.info(
-        "Enrichment: %d/%d labs updated with metrics",
-        enrich_result["success"],
-        enrich_result["total"],
-    )
+        enrich_result = await enrich_all_labs(only_without_metrics=True)
+        logger.info(
+            "Enrichment: %d/%d labs updated with metrics",
+            enrich_result["success"],
+            enrich_result["total"],
+        )
 
-    return {
-        "total": len(results),
-        "success": success,
-        "failed": failed,
-        "enriched": enrich_result["success"],
-    }
+        if log_id is not None:
+            async with AsyncSessionLocal() as session:
+                log = await session.get(IngestionLogORM, log_id)
+                if log:
+                    log.finished_at = datetime.now(timezone.utc)
+                    log.success_count = success
+                    log.failed_count = failed
+                    await session.commit()
+
+        return {
+            "total": len(results),
+            "success": success,
+            "failed": failed,
+            "enriched": enrich_result["success"],
+        }
+    except Exception as exc:
+        if log_id is not None:
+            async with AsyncSessionLocal() as session:
+                log = await session.get(IngestionLogORM, log_id)
+                if log:
+                    log.finished_at = datetime.now(timezone.utc)
+                    log.error_message = str(exc)[:500]
+                    await session.commit()
+        raise

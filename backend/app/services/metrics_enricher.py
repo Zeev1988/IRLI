@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 S2_API_BASE = "https://api.semanticscholar.org/graph/v1"
 # 100 req / 5 min ≈ 1 req every 3s; use 3s to stay under limit
 _RATE_LIMIT_DELAY = float(os.getenv("S2_RATE_LIMIT_DELAY", "3"))
+# Batch endpoint accepts up to 1000; use 100 per request to stay under rate limits
+_S2_BATCH_CHUNK_SIZE = 100
 
 _s2_client: httpx.AsyncClient | None = None
 
@@ -78,6 +80,56 @@ async def _s2_get(url: str, params: dict | None = None) -> httpx.Response:
             elif resp.status_code >= 500:
                 logger.warning("S2 %s, retry %d/3", resp.status_code, attempt.retry_state.attempt_number)
             return resp
+
+
+async def _s2_post(url: str, json_body: dict, params: dict | None = None) -> httpx.Response:
+    """POST with tenacity retry for batch endpoint."""
+    client = _get_s2_client()
+    async for attempt in AsyncRetrying(
+        retry=retry_if_exception_type(Exception) | retry_if_result(_s2_should_retry),
+        stop=stop_after_attempt(3),
+        wait=_s2_wait,
+        reraise=True,
+    ):
+        with attempt:
+            resp = await client.post(url, json=json_body, params=params or {})
+            if resp.status_code == 429:
+                logger.warning("S2 rate limited (429), waiting Retry-After")
+            elif resp.status_code >= 500:
+                logger.warning("S2 %s, retry %d/3", resp.status_code, attempt.retry_state.attempt_number)
+            return resp
+
+
+async def _fetch_authors_batch(author_ids: list[str]) -> dict[str, dict]:
+    """
+    Fetch metrics for multiple authors via POST /author/batch.
+    Returns {author_id: {paperCount, citationCount, hIndex}} for authors found.
+    """
+    if not author_ids:
+        return {}
+    url = f"{S2_API_BASE}/author/batch"
+    params = {"fields": "paperCount,citationCount,hIndex"}
+    try:
+        resp = await _s2_post(url, {"ids": author_ids}, params=params)
+    except Exception:
+        logger.exception("S2 batch fetch failed for %d authors", len(author_ids))
+        return {}
+    if resp.status_code != 200:
+        logger.warning("S2 batch: %s", resp.status_code)
+        return {}
+    data = resp.json()
+    result: dict[str, dict] = {}
+    for i, author_id in enumerate(author_ids):
+        if i < len(data) and data[i] is not None:
+            author = data[i]
+            metrics = {
+                "paperCount": author.get("paperCount"),
+                "citationCount": author.get("citationCount"),
+                "hIndex": author.get("hIndex"),
+            }
+            if any(v is not None for v in metrics.values()):
+                result[author_id] = metrics
+    return result
 
 
 async def fetch_author_metrics(author_id: str) -> dict | None:
@@ -170,6 +222,45 @@ def _name_matches(pi_name: str, author_name: str) -> bool:
             pass
 
     return False
+
+
+async def _resolve_author_id_for_lab(lab_id: int, session: AsyncSession) -> str | None:
+    """
+    Resolve Semantic Scholar author_id for a lab via paper search or author search.
+    Returns author_id or None. Does not fetch metrics.
+    """
+    result = await session.execute(select(LabProfileORM).where(LabProfileORM.id == lab_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        return None
+
+    representative_papers = getattr(row, "representative_papers", None) or []
+    if representative_papers:
+        for paper_title in representative_papers[:5]:
+            author_id = await _find_author_via_paper_search(paper_title, row.pi_name)
+            if author_id:
+                return author_id
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+
+    search_url = f"{S2_API_BASE}/author/search"
+    params = {
+        "query": row.pi_name,
+        "fields": "authorId,name,affiliations,paperCount,citationCount,hIndex",
+    }
+    try:
+        resp = await _s2_get(search_url, params=params)
+    except Exception:
+        logger.exception("S2 search failed for lab %d", lab_id)
+        return None
+    if resp.status_code != 200:
+        return None
+    authors = resp.json().get("data") or []
+    for author in authors:
+        if _author_matches_institution(author, row.institution or ""):
+            author_id = author.get("authorId")
+            if author_id:
+                return author_id
+    return None
 
 
 async def _find_author_via_paper_search(
@@ -363,12 +454,26 @@ async def enrich_all_labs(
 ) -> dict[str, int]:
     """
     Enrich labs with metrics from Semantic Scholar.
-    Returns {"total", "success", "failed"}.
+    Uses POST /author/batch to reduce API calls. Returns {"total", "success", "failed"}.
 
     Args:
         limit: Max labs to process (None = all).
         only_without_metrics: If True, only enrich labs where publication_count IS NULL.
     """
+    if DEBUG_MODE:
+        async with AsyncSessionLocal() as session:
+            stmt = select(LabProfileORM.id).order_by(LabProfileORM.id)
+            if only_without_metrics:
+                stmt = stmt.where(LabProfileORM.publication_count.is_(None))
+            if limit:
+                stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            lab_ids = [r[0] for r in result.all()]
+        for lab_id in lab_ids:
+            async with AsyncSessionLocal() as session:
+                await enrich_lab_metrics(lab_id, session)
+        return {"total": len(lab_ids), "success": len(lab_ids), "failed": 0}
+
     async with AsyncSessionLocal() as session:
         stmt = select(LabProfileORM.id).order_by(LabProfileORM.id)
         if only_without_metrics:
@@ -378,12 +483,48 @@ async def enrich_all_labs(
         result = await session.execute(stmt)
         lab_ids = [r[0] for r in result.all()]
 
-    success = 0
+    lab_to_author: dict[int, str] = {}
     for lab_id in lab_ids:
         async with AsyncSessionLocal() as session:
-            if await enrich_lab_metrics(lab_id, session):
-                success += 1
+            author_id = await _resolve_author_id_for_lab(lab_id, session)
+            if author_id:
+                lab_to_author[lab_id] = author_id
         await asyncio.sleep(_RATE_LIMIT_DELAY)
+
+    all_author_ids = list(lab_to_author.values())
+    author_metrics: dict[str, dict] = {}
+    for i in range(0, len(all_author_ids), _S2_BATCH_CHUNK_SIZE):
+        chunk = all_author_ids[i : i + _S2_BATCH_CHUNK_SIZE]
+        batch = await _fetch_authors_batch(chunk)
+        author_metrics.update(batch)
+        if i + _S2_BATCH_CHUNK_SIZE < len(all_author_ids):
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+
+    success = 0
+    for lab_id, author_id in lab_to_author.items():
+        metrics = author_metrics.get(author_id)
+        if not metrics:
+            continue
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(LabProfileORM)
+                .where(LabProfileORM.id == lab_id)
+                .values(
+                    publication_count=metrics.get("paperCount"),
+                    citation_count=metrics.get("citationCount"),
+                    h_index=metrics.get("hIndex"),
+                    semantic_scholar_author_id=author_id,
+                    metrics_updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+            success += 1
+        logger.debug(
+            "Enriched lab %d: %s papers, %s citations",
+            lab_id,
+            metrics.get("paperCount"),
+            metrics.get("citationCount"),
+        )
 
     failed = len(lab_ids) - success
     logger.info("Enrichment complete: %d/%d succeeded", success, len(lab_ids))
