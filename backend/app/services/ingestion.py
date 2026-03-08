@@ -11,7 +11,7 @@ Concurrency is capped by a semaphore to avoid hammering the LLM API.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from openai import AsyncOpenAI
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -31,6 +31,8 @@ from app.services.metrics_enricher import enrich_all_labs
 logger = logging.getLogger(__name__)
 
 _CONCURRENCY_LIMIT = int(os.getenv("INGEST_CONCURRENCY", "5"))
+# Skip crawl+extract if lab exists and was crawled within this many days (0 = disabled)
+_SKIP_RECENT_CRAWLS_DAYS = int(os.getenv("SKIP_RECENT_CRAWLS_DAYS", "7"))
 
 # ---------------------------------------------------------------------------
 # Embedding
@@ -52,6 +54,22 @@ def _embedding_content(profile: LabProfile) -> tuple[tuple[str, ...], tuple[str,
         tuple(profile.keywords),
         tuple(profile.technologies),
     )
+
+
+async def _should_skip_recent_crawl(lab_url: str) -> bool:
+    """Return True if lab exists and was crawled within SKIP_RECENT_CRAWLS_DAYS."""
+    if _SKIP_RECENT_CRAWLS_DAYS <= 0:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_SKIP_RECENT_CRAWLS_DAYS)
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                select(LabProfileORM.last_crawled_at).where(LabProfileORM.lab_url == lab_url)
+            )
+        ).first()
+    if not row or not row.last_crawled_at:
+        return False
+    return row.last_crawled_at >= cutoff
 
 
 async def _get_existing_embedding_if_unchanged(
@@ -174,6 +192,9 @@ async def _process_lab(url: str, semaphore: asyncio.Semaphore) -> bool:
     """Crawl, extract, embed (only if content changed), and upsert a single lab."""
     async with semaphore:
         try:
+            if await _should_skip_recent_crawl(url):
+                logger.info("Skipping %s (recently crawled)", url)
+                return True
             logger.info("Processing lab: %s", url)
             markdown = await crawl_lab_with_nested(url)
             profile = await extract_lab_data(markdown, url)

@@ -17,6 +17,7 @@ import logging
 from typing import Literal
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, CrawlResult
+from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import DEBUG_MODE
 
@@ -70,17 +71,8 @@ def _extract_markdown_str(result: CrawlResult) -> str:
     return str(md) if md else ""
 
 
-async def crawl_to_result(
-    url: str,
-    page_type: Literal["index", "lab"] = "lab",
-) -> CrawlResult:
-    """
-    Fetch *url* and return the full CrawlResult (markdown, links, etc.).
-
-    In DEBUG_MODE, raises RuntimeError (caller should use crawl_to_markdown stub path).
-    """
-    config = _INDEX_CFG if page_type == "index" else _LAB_CFG
-    logger.info("Crawling %s (page_type=%s)", url, page_type)
+async def _do_crawl(url: str, config: CrawlerRunConfig) -> CrawlResult:
+    """Single crawl attempt. Raises RuntimeError on failure."""
     async with AsyncWebCrawler(config=_BROWSER_CFG) as crawler:
         result = await crawler.arun(url=url, config=config)
 
@@ -92,9 +84,32 @@ async def crawl_to_result(
     markdown = _extract_markdown_str(result)
     if not markdown.strip():
         raise RuntimeError(f"No readable content extracted from {url}")
-
-    logger.info("Crawled %s — %d characters of Markdown", url, len(markdown))
     return result
+
+
+async def crawl_to_result(
+    url: str,
+    page_type: Literal["index", "lab"] = "lab",
+) -> CrawlResult:
+    """
+    Fetch *url* and return the full CrawlResult (markdown, links, etc.).
+
+    Retries up to 3 times with exponential backoff (4s, 8s, 16s) for flaky university sites.
+    In DEBUG_MODE, raises RuntimeError (caller should use crawl_to_markdown stub path).
+    """
+    config = _INDEX_CFG if page_type == "index" else _LAB_CFG
+    logger.info("Crawling %s (page_type=%s)", url, page_type)
+
+    async for attempt in AsyncRetrying(
+        retry=retry_if_exception_type((RuntimeError, Exception)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        reraise=True,
+    ):
+        with attempt:
+            result = await _do_crawl(url, config)
+            logger.info("Crawled %s — %d characters of Markdown", url, len(_extract_markdown_str(result)))
+            return result
 
 
 async def crawl_to_markdown(
