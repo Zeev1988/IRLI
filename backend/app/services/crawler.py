@@ -26,9 +26,17 @@ logger = logging.getLogger(__name__)
 _CACHE_ENABLED = os.getenv("CRAWL_CACHE_ENABLED", "true").lower() == "true"
 _CACHE_MODE = CacheMode.ENABLED if _CACHE_ENABLED else CacheMode.BYPASS
 
+# Identify crawler for robots.txt compliance; admins can contact via CRAWL_CONTACT_EMAIL
+if os.getenv("CRAWL_USER_AGENT"):
+    _CRAWL_USER_AGENT = os.getenv("CRAWL_USER_AGENT")
+else:
+    _contact = f"mailto:{os.getenv('CRAWL_CONTACT_EMAIL')}" if os.getenv("CRAWL_CONTACT_EMAIL") else "contact via project README"
+    _CRAWL_USER_AGENT = f"IRLI/1.0 (Israel Research Lab Index; +https://github.com; {_contact})"
+
 _BROWSER_CFG = BrowserConfig(
     headless=True,
     verbose=False,
+    user_agent=_CRAWL_USER_AGENT,
 )
 
 _BASE_KW = dict(
@@ -37,6 +45,7 @@ _BASE_KW = dict(
     remove_overlay_elements=True,
     exclude_external_links=False,  # Keep cross-subdomain links (e.g. cs.huji.ac.il from cognitive.huji.ac.il)
     exclude_social_media_links=True,
+    check_robots_txt=True,
 )
 
 # Index pages: faculty lists loaded dynamically — wait longer, scroll to trigger lazy load
