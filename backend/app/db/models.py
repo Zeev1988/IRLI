@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
@@ -26,7 +27,9 @@ class LabProfileORM(Base):
     hiring_status: Mapped[str] = mapped_column(Text, nullable=False)
     lab_url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
 
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(
+    Vector(int(os.getenv("EMBEDDING_DIM", "1024"))), nullable=True
+    )
 
     publication_count: Mapped[int | None] = mapped_column(nullable=True)
     citation_count: Mapped[int | None] = mapped_column(nullable=True)

@@ -30,7 +30,7 @@ async def ingest_task(ctx: dict, index_url: str) -> dict:
 
 
 async def enrich_task(ctx: dict, limit: int | None = None) -> dict:
-    """Background task: enrich labs with Semantic Scholar metrics."""
+    """Background task: enrich labs with OpenAlex metrics."""
     logger.info("Worker: starting enrich (limit=%s)", limit)
     result = await enrich_all_labs(limit=limit, only_without_metrics=False)
     logger.info("Worker: enrich complete: %s", result)

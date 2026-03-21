@@ -10,7 +10,6 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from openai import AsyncOpenAI
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import DEBUG_MODE
 from app.db.database import get_session
+from app.services.embeddings import get_embedding
 from app.db.models import LabProfileORM
 from app.jobs import enqueue_enrich, enqueue_ingest, use_queue
 from app.services.ingestion import ingest_faculty
@@ -29,18 +29,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/labs", tags=["labs"])
 
-_embed_client: AsyncOpenAI | None = None
-
-
-def _get_embed_client() -> AsyncOpenAI:
-    global _embed_client
-    if _embed_client is None:
-        _embed_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    return _embed_client
-
 
 async def _embed_query(query: str) -> list[float]:
-    """Embed search query with tenacity retries for 429/500."""
+    """Embed search query (OpenAI 3-large or BGE-Large)."""
     async for attempt in AsyncRetrying(
         retry=retry_if_exception_type(Exception),
         stop=stop_after_attempt(3),
@@ -48,10 +39,7 @@ async def _embed_query(query: str) -> list[float]:
         reraise=True,
     ):
         with attempt:
-            resp = await _get_embed_client().embeddings.create(
-                model="text-embedding-3-small", input=query
-            )
-            return resp.data[0].embedding
+            return await get_embedding(query)
 
 
 def _orm_to_dict(row: LabProfileORM) -> dict[str, Any]:
@@ -256,7 +244,7 @@ class IngestRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @router.post(
     "/enrich",
-    summary="Enrich labs with publication metrics from Semantic Scholar",
+    summary="Enrich labs with publication metrics from OpenAlex",
     description="Fetches publication_count, citation_count, h_index for each lab's PI.",
     response_model=None,
 )

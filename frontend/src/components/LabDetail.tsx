@@ -150,9 +150,9 @@ export function LabDetail({ lab }: LabDetailProps) {
       <div className="flex flex-wrap gap-3">
         {lab.semantic_scholar_author_id && (
           <LinkButton
-            href={`https://www.semanticscholar.org/author/${lab.semantic_scholar_author_id}`}
+            href={`https://openalex.org/${lab.semantic_scholar_author_id}`}
           >
-            View on Semantic Scholar
+            View on OpenAlex
           </LinkButton>
         )}
         {lab.lab_url && (

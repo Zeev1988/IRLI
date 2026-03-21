@@ -39,7 +39,7 @@ class LabProfile(BaseModel):
         description=(
             "Representative paper titles for author disambiguation. "
             "Extract when listed on the lab page (e.g. Publications, Selected Works). "
-            "Used to match the correct author in Semantic Scholar when affiliations are missing."
+            "Used to match the correct author in OpenAlex when affiliations are missing."
         ),
     )
 

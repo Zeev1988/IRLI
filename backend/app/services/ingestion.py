@@ -13,7 +13,6 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from openai import AsyncOpenAI
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -24,6 +23,7 @@ from app.db.database import AsyncSessionLocal
 from app.db.models import IngestionLogORM, LabProfileORM
 from app.models.lab import LabProfile
 from app.services.discoverer import discover_lab_urls
+from app.services.embeddings import EMBEDDING_DIM, get_embeddings
 from app.services.extractor import extract_lab_data
 from app.services.lab_crawler import crawl_lab_with_nested
 from app.services.metrics_enricher import enrich_all_labs
@@ -37,16 +37,6 @@ _SKIP_RECENT_CRAWLS_DAYS = int(os.getenv("SKIP_RECENT_CRAWLS_DAYS", "7"))
 # ---------------------------------------------------------------------------
 # Embedding
 # ---------------------------------------------------------------------------
-_embed_client: AsyncOpenAI | None = None
-
-
-def _get_embed_client() -> AsyncOpenAI:
-    global _embed_client
-    if _embed_client is None:
-        _embed_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    return _embed_client
-
-
 def _embedding_content(profile: LabProfile) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Content used for embedding — used to detect changes."""
     return (
@@ -96,10 +86,9 @@ async def _get_existing_embedding_if_unchanged(
 
 
 async def _embed(profile: LabProfile) -> list[float] | None:
-    """Generate a 1536-dim embedding from the lab's summary + keywords."""
+    """Generate embedding from the lab's summary + keywords (OpenAI 3-large or BGE-Large)."""
     if DEBUG_MODE:
-        # Return a zero vector in debug mode so the DB upsert still works
-        return [0.0] * 1536
+        return [0.0] * EMBEDDING_DIM
 
     text_to_embed = (
         " ".join(profile.research_summary)
@@ -117,14 +106,11 @@ async def _embed(profile: LabProfile) -> list[float] | None:
             reraise=True,
         ):
             with attempt:
-                response = await _get_embed_client().embeddings.create(
-                    model="text-embedding-3-small",
-                    input=text_to_embed,
-                )
-                return response.data[0].embedding
+                results = await get_embeddings([text_to_embed])
+                return results[0]
     except Exception:
         logger.exception("Embedding failed for %s — storing without embedding", profile.pi_name)
-        return [0.0] * 1536
+        return [0.0] * EMBEDDING_DIM
 
 
 # ---------------------------------------------------------------------------

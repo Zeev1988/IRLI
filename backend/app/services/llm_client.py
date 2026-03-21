@@ -36,6 +36,7 @@ def _init_client() -> None:
         _client = instructor.from_genai(
             client=client,
             mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS,
+            use_async=True
         )
     else:
         raw = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])

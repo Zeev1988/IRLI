@@ -2,15 +2,18 @@
 CLI entry point to run the metrics enrichment pipeline manually.
 
 Usage:
-    python enrich_run.py                    # enrich all labs in DB
-    python enrich_run.py 10                 # enrich first 10 labs
-    python enrich_run.py --lab 42           # enrich single lab by ID
+    python enrich_run.py                    # enrich labs without metrics (default)
+    python enrich_run.py --all               # enrich all labs in DB (including those with metrics)
+    python enrich_run.py 10                  # enrich first 10 labs (without metrics)
+    python enrich_run.py --all 10            # enrich first 10 labs (all)
+    python enrich_run.py --lab 42            # enrich single lab by ID
+    python enrich_run.py --only-without-metrics  # explicit: only labs without metrics (default)
     python enrich_run.py --stub              # enrich extractor DEBUG_STUB profiles and upsert to Supabase
     python enrich_run.py --template         # use template (no DB, no API)
     python enrich_run.py --fetch             # test S2 API: search + fetch (template profile)
     python enrich_run.py --fetch-id [id]     # test fetch_author_metrics (omit id for default)
 
-Set DEBUG_MODE=true in .env to skip Semantic Scholar API and use stub values.
+Set DEBUG_MODE=true in .env to skip OpenAlex API and use stub values.
 With --template, skips DB and API entirely; uses a hardcoded LabProfile example.
 """
 import asyncio
@@ -33,8 +36,8 @@ from app.services.metrics_enricher import (
 )
 from debug.stubs import DEBUG_STUB
 
-# Default author ID for --fetch-id (Geoffrey Hinton, well-known researcher)
-DEFAULT_TEST_AUTHOR_ID = "114131011"
+# Default author ID for --fetch-id (Albert Einstein, OpenAlex)
+DEFAULT_TEST_AUTHOR_ID = "A5083138872"
 
 # Template LabProfile for DEBUG_MODE + --template (no DB required)
 TEMPLATE_PROFILE = {
@@ -74,9 +77,9 @@ TEMPLATE_PROFILE = {
 
 
 async def __run_fetch_mode() -> None:
-    """Test Semantic Scholar API: search + fetch using template profile."""
+    """Test OpenAlex API: search + fetch using template profile."""
     print(f"\n{'='*60}")
-    print("  IRLI Metrics Enrichment — Semantic Scholar API Test")
+    print("  IRLI Metrics Enrichment — OpenAlex API Test")
     print(f"  DEBUG_MODE : {DEBUG_MODE}")
     print(f"{'='*60}\n")
     pi_name = TEMPLATE_PROFILE["pi_name"]
@@ -94,7 +97,7 @@ async def __run_fetch_mode() -> None:
 
 
 async def __run_fetch_id_mode(author_id: str) -> None:
-    """Test _fetch_author_metrics directly with a Semantic Scholar author ID."""
+    """Test _fetch_author_metrics directly with an OpenAlex author ID."""
     print(f"\n{'='*60}")
     print("  IRLI Metrics — fetch_author_metrics Test")
     print(f"  author_id : {author_id}")
@@ -135,13 +138,13 @@ def __run_template_mode() -> None:
     """Run enrichment with template profile — no DB, no API."""
     print(f"\n{'='*60}")
     print("  IRLI Metrics Enrichment Runner (template mode)")
-    print("  SKIP: DB, Semantic Scholar API")
+    print("  SKIP: DB, OpenAlex API")
     print(f"{'='*60}\n")
     print("Template LabProfile:")
     print(json.dumps(TEMPLATE_PROFILE, indent=2, ensure_ascii=False))
     print()
     query = f"{TEMPLATE_PROFILE['pi_name']} {TEMPLATE_PROFILE['institution']}"
-    print(f"Would search Semantic Scholar: query=\"{query}\"")
+    print(f"Would search OpenAlex: query=\"{query}\"")
     print("Stub metrics (DEBUG_MODE): publication_count=0, citation_count=0, h_index=0")
     print("\n→ Template mode complete (no DB write)\n")
 
@@ -164,8 +167,9 @@ async def main() -> None:
         print(f"  → {'OK' if ok else 'FAILED'}\n")
         return
 
-    args = [a for a in sys.argv[1:] if a != "--only-without-metrics"]
-    only_without = "--only-without-metrics" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--only-without-metrics", "--all")]
+    # Default: only labs without metrics. Use --all to enrich everything.
+    only_without = "--all" not in sys.argv
     limit = int(args[0]) if args and args[0].isdigit() else None
     if limit:
         print(f"Enriching up to {limit} labs...\n")
@@ -173,6 +177,8 @@ async def main() -> None:
         print("Enriching all labs...\n")
     if only_without:
         print("(only labs without metrics)\n")
+    else:
+        print("(all labs, including those with existing metrics)\n")
 
     result = await enrich_all_labs(limit=limit, only_without_metrics=only_without)
     print(f"  total  : {result['total']}")
