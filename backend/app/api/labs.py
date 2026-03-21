@@ -258,6 +258,7 @@ class IngestRequest(BaseModel):
     "/enrich",
     summary="Enrich labs with publication metrics from Semantic Scholar",
     description="Fetches publication_count, citation_count, h_index for each lab's PI.",
+    response_model=None,
 )
 async def trigger_enrich(
     limit: int | None = Query(None, ge=1, le=500, description="Max labs to enrich (default: all)"),
@@ -286,6 +287,7 @@ async def trigger_enrich(
         "Discovers all lab links on the given faculty index page, "
         "crawls each one, extracts a LabProfile, and upserts it into the DB."
     ),
+    response_model=None,
 )
 async def trigger_ingest(body: IngestRequest) -> dict[str, Any] | JSONResponse:
     if use_queue():

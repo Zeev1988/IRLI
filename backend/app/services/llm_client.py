@@ -7,7 +7,7 @@ Only configured when DEBUG_MODE is false.
 import os
 from typing import Any
 
-import google.generativeai as genai
+import google.genai as genai
 import instructor
 from openai import AsyncOpenAI
 

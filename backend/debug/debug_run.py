@@ -18,7 +18,6 @@ from app.services.lab_crawler import crawl_lab_with_nested
 
 load_dotenv()
 
-from app.services.crawler import crawl_to_markdown
 from app.services.extractor import extract_lab_data, DEBUG_MODE
 
 
