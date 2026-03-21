@@ -31,13 +31,12 @@ def _init_client() -> None:
     _PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
 
     if _PROVIDER == "gemini":
-        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-        _client = instructor.from_gemini(
-            client=gemini_model,
-            mode=instructor.Mode.GEMINI_JSON,
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        _MODEL = "gemini-2.5-flash-lite"
+        _client = instructor.from_genai(
+            client=client,
+            mode=instructor.Mode.GENAI_STRUCTURED_OUTPUTS,
         )
-        _MODEL = "gemini-1.5-flash"
     else:
         raw = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
         _client = instructor.from_openai(raw)
