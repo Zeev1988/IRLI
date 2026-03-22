@@ -1,3 +1,4 @@
+// Set NEXT_PUBLIC_API_URL in Vercel/env (e.g. https://api.your-app.com). Defaults to localhost for dev.
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
