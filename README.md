@@ -123,6 +123,12 @@ Switch provider by setting `LLM_PROVIDER=gemini` in `.env`.
 
 ---
 
+## Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for deploying the frontend (Vercel) and backend (Render/Railway).
+
+---
+
 ## Roadmap
 
 - [ ] PostgreSQL + pgvector (Supabase) for semantic search
