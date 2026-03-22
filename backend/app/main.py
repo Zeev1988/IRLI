@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from app.api import labs as _labs_module
 from app.api.routes import router
 from app.db.init import ensure_db_ready
 from app.jobs import close_redis_pool, get_redis_pool, use_queue
+from app.services.embeddings import _get_model
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(
@@ -28,6 +30,13 @@ _DB_AVAILABLE = bool(os.getenv("DATABASE_URL"))
 async def lifespan(app: FastAPI):
     if _DB_AVAILABLE:
         await ensure_db_ready()
+        # Pre-warm embedding model at startup so first search doesn't download mid-request
+        try:
+            await asyncio.to_thread(_get_model)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Embedding model failed to load at startup (%s); search will use keyword fallback.", e
+            )
         app.include_router(_labs_module.router)
         app.include_router(_jobs_module.router)
         app.include_router(_ingestion_logs_module.router)
@@ -55,11 +64,7 @@ CORS_ORIGINS = [o.strip() for o in _allowed_origins.split(",") if o.strip()] or 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://irli-frontend.vercel.app",
-        "https://irli.vercel.app"
-    ],
+    allow_origins=CORS_ORIGINS, # Use the variable you defined above
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
