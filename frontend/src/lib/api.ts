@@ -1,6 +1,6 @@
-// Set NEXT_PUBLIC_API_URL to your backend root (e.g. https://irli.onrender.com). /api/v1 is appended automatically.
+// Set to full API base including /api/v1 (e.g. https://irli.onrender.com/api/v1). No trailing slash.
 const API_BASE =
-  (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "") + "/api/v1";
+  (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1").replace(/\/$/, "");
 
 export interface Lab {
   id: number;
