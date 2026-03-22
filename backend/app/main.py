@@ -55,7 +55,12 @@ CORS_ORIGINS = [o.strip() for o in _allowed_origins.split(",") if o.strip()] or 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://irli-frontend.vercel.app",
+        "https://irli.vercel.app"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
