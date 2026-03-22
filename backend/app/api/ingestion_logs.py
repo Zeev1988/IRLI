@@ -10,7 +10,7 @@ from app.db.models import IngestionLogORM
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/api/v1/ingestion-logs", tags=["ingestion-logs"])
+router = APIRouter(prefix="/ingestion-logs", tags=["ingestion-logs"])
 
 
 @router.get(

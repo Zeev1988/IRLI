@@ -5,7 +5,7 @@ from app.models.lab import ExtractRequest, ExtractResponse
 from app.services.extractor import extract_lab_data
 from app.services.lab_crawler import crawl_lab_with_nested
 
-router = APIRouter(prefix="/api/v1", tags=["extraction"])
+router = APIRouter(prefix="", tags=["extraction"])
 
 
 @router.post(
