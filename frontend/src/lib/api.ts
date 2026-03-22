@@ -50,7 +50,7 @@ export async function fetchLabs(
   if (filters.sort_by) params.set("sort_by", filters.sort_by);
   if (filters.sort_order) params.set("sort_order", filters.sort_order);
   params.set("limit", String(filters.limit ?? limit));
-  const res = await fetch(`${API_BASE}/api/v1/labs?${params}`, {
+  const res = await fetch(`${API_BASE}/labs?${params}`, {
     cache: "no-store",
   });
   if (!res.ok) {
@@ -61,13 +61,13 @@ export async function fetchLabs(
 }
 
 export async function fetchTopics(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/api/v1/labs/topics`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}/labs/topics`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch topics (${res.status})`);
   return res.json();
 }
 
 export async function fetchLab(id: number): Promise<Lab | null> {
-  const res = await fetch(`${API_BASE}/api/v1/labs/${id}`, {
+  const res = await fetch(`${API_BASE}/labs/${id}`, {
     cache: "no-store",
   });
   if (res.status === 404) return null;
