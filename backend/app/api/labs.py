@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import Text, and_, func, select, text
+from sqlalchemy import Text, and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from app.config import DEBUG_MODE
 from app.db.database import get_session
 from app.services.embeddings import get_embedding
+from app.services.topic_expansion import expand_topics_by_similarity
 from app.db.models import LabProfileORM
 from app.jobs import enqueue_enrich, enqueue_ingest, use_queue
 from app.services.ingestion import ingest_faculty
@@ -72,15 +73,25 @@ def _orm_to_dict(row: LabProfileORM) -> dict[str, Any]:
     description="Returns sorted distinct values from lab keywords (used for topic filter dropdown).",
 )
 async def list_topics(session: AsyncSession = Depends(get_session)) -> list[str]:
-    stmt = text(
-        """
-        SELECT DISTINCT unnest(keywords) AS topic
+    return await _fetch_distinct_topics(session)
+
+
+DISTINCT_TOPICS_SQL = text(
+    """
+    SELECT DISTINCT ON (LOWER(topic)) topic
+    FROM (
+        SELECT unnest(keywords) AS topic
         FROM lab_profiles
         WHERE keywords IS NOT NULL AND array_length(keywords, 1) > 0
-        ORDER BY topic
-        """
-    )
-    result = await session.execute(stmt)
+    ) sub
+    ORDER BY LOWER(topic), topic
+    """
+)
+
+
+async def _fetch_distinct_topics(session: AsyncSession) -> list[str]:
+    """Fetch case-deduplicated distinct topics from lab_profiles."""
+    result = await session.execute(DISTINCT_TOPICS_SQL)
     return [row[0] for row in result.fetchall() if row[0]]
 
 
@@ -166,8 +177,14 @@ async def list_labs(
     limit: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
+    topics_to_filter = topic or []
+    if topics_to_filter:
+        topics_clean = [t.strip() for t in topics_to_filter if t and str(t).strip()]
+        if topics_clean:
+            all_topics = await _fetch_distinct_topics(session)
+            topics_to_filter = await expand_topics_by_similarity(topics_clean, all_topics)
     filter_clauses = _build_filter_clauses(
-        institution, faculty, keyword, topic or [],
+        institution, faculty, keyword, topics_to_filter,
         min_publication_count, min_citation_count, min_h_index,
     )
     base_filter = and_(*filter_clauses) if filter_clauses else True
@@ -228,13 +245,11 @@ async def list_labs(
         if keyword and keyword.strip():
             filter_sql += " AND EXISTS (SELECT 1 FROM unnest(keywords) AS kw WHERE kw ILIKE :kw_pat)"
             filter_params["kw_pat"] = f"%{keyword.strip()}%"
-        if topic:
-            topics_clean = [t.strip() for t in topic if t and str(t).strip()]
-            if topics_clean:
-                ph = ", ".join(f":topic_{i}" for i in range(len(topics_clean)))
-                filter_sql += f" AND EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw IN ({ph}))"
-                for i, t in enumerate(topics_clean):
-                    filter_params[f"topic_{i}"] = t
+        if topics_to_filter:
+            ph = ", ".join(f":topic_{i}" for i in range(len(topics_to_filter)))
+            filter_sql += f" AND EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw IN ({ph}))"
+            for i, t in enumerate(topics_to_filter):
+                filter_params[f"topic_{i}"] = t
         if min_publication_count is not None:
             filter_sql += " AND publication_count >= :min_pub"
             filter_params["min_pub"] = min_publication_count
