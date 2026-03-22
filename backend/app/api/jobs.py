@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.jobs import get_job_status, use_queue
 
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 
 @router.get(

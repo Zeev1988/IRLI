@@ -1,6 +1,6 @@
-// Set NEXT_PUBLIC_API_URL in Vercel/env (e.g. https://api.your-app.com). Defaults to localhost for dev.
+// Set NEXT_PUBLIC_API_URL to your backend root (e.g. https://irli.onrender.com). /api/v1 is appended automatically.
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "") + "/api/v1";
 
 export interface Lab {
   id: number;

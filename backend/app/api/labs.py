@@ -28,7 +28,7 @@ from app.services.metrics_enricher import enrich_all_labs
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/labs", tags=["labs"])
+router = APIRouter(prefix="/api/v1/labs", tags=["labs"])
 
 
 async def _embed_query(query: str) -> list[float]:
