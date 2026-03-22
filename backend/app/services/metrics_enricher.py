@@ -3,7 +3,8 @@ Enrich lab profiles with publication metrics from OpenAlex API.
 
 Fetches publication_count, citation_count, h_index for each lab's PI
 by searching OpenAlex and matching by name + institution.
-Uses "Known Paper" strategy when representative_papers are available.
+Resolution order: (1) author search filtered by institution ID, (2) if 0 or
+multiple matches, fall back to Known Paper strategy using representative_papers.
 
 OpenAlex: optional OA_API_KEY enables $1/day free credits and higher limits.
 """
@@ -31,11 +32,22 @@ logger = logging.getLogger(__name__)
 OA_API_BASE = "https://api.openalex.org"
 _RATE_LIMIT_DELAY = float(os.getenv("OA_RATE_LIMIT_DELAY", "0.2"))
 _oa_client: httpx.AsyncClient | None = None
+_institution_id_cache: dict[str, str | None] = {}
+
+
+_DEFAULT_MAILTO = "irli@example.com"
+_mailto_warned = False
 
 
 def _get_oa_headers() -> dict:
-    """User-Agent with mailto for polite pool (10 req/s)."""
-    mailto = os.getenv("OA_MAILTO", "irli@example.com")
+    """User-Agent with mailto for polite pool. Set OA_MAILTO to your email in production."""
+    global _mailto_warned
+    mailto = os.getenv("OA_MAILTO", _DEFAULT_MAILTO)
+    if not _mailto_warned and mailto == _DEFAULT_MAILTO and not os.getenv("OA_API_KEY"):
+        _mailto_warned = True
+        logger.warning(
+            "OA_MAILTO not set: using placeholder. Set OA_MAILTO=your@email.com for polite pool."
+        )
     return {
         "User-Agent": f"IRLI/1.0 (https://github.com/irli; mailto:{mailto})",
         "Accept": "application/json",
@@ -65,7 +77,7 @@ def _oa_wait(retry_state) -> float:
 
 
 def _extract_author_id(oa_url: str | None) -> str | None:
-    """Extract short ID (e.g. A1234567) from https://openalex.org/A1234567."""
+    """Extract short ID (e.g. A1234567, I123456) from https://openalex.org/..."""
     if not oa_url or "/" not in oa_url:
         return None
     return oa_url.rsplit("/", 1)[-1] or None
@@ -81,25 +93,36 @@ def _oa_author_to_metrics(author: dict) -> dict:
     }
 
 
-def _author_matches_institution(author: dict, institution: str) -> bool:
-    """Check if author's affiliations contain the institution (or no filter)."""
+def _institution_match_strength(author: dict, institution: str) -> int:
+    """
+    Return 0=no match, 1=substring, 2=exact. Used for disambiguation ranking.
+    """
     if not institution or not institution.strip():
-        return True
-    inst_lower = institution.strip().lower()
-    # Check affiliations
+        return 2
+    inst = institution.strip().lower()
+    best = 0
+
+    def check(display_name: str) -> None:
+        nonlocal best
+        dn = (display_name or "").lower()
+        if not dn:
+            return
+        if inst == dn:
+            best = max(best, 2)
+        elif inst in dn or dn in inst:
+            best = max(best, 1)
+
     for aff in author.get("affiliations") or []:
-        inst = aff.get("institution") or {}
-        if inst_lower in (inst.get("display_name") or "").lower():
-            return True
-    # Check last_known_institutions
-    for inst in author.get("last_known_institutions") or []:
-        if inst_lower in (inst.get("display_name") or "").lower():
-            return True
-    return False
+        check((aff.get("institution") or {}).get("display_name"))
+    for i in author.get("last_known_institutions") or []:
+        check(i.get("display_name"))
+    return best
 
 
-def _name_matches(pi_name: str, author_name: str) -> bool:
-    """Check if PI name matches author name (handles titles, initials, etc.)."""
+def _name_match_strength(pi_name: str, author: dict) -> int:
+    """
+    Return 0=no match, 1=last+initial, 2=exact. Checks display_name and alternatives.
+    """
     def tokenize(s: str) -> list:
         if not s:
             return []
@@ -107,27 +130,50 @@ def _name_matches(pi_name: str, author_name: str) -> bool:
         s = re.sub(r"[^\w\s-]", " ", s)
         return s.split()
 
-    pi_tokens = tokenize(pi_name)
-    auth_tokens = tokenize(author_name or "")
-    if not pi_tokens or not auth_tokens:
-        return False
-    if pi_tokens == auth_tokens:
-        return True
-    pi_last = pi_tokens[-1]
-    auth_last = auth_tokens[-1]
-    if pi_last != auth_last and pi_tokens[0] != auth_tokens[0]:
-        if pi_last not in auth_tokens and auth_last not in pi_tokens:
-            return False
-    if pi_last in auth_tokens:
-        pi_first_initial = pi_tokens[0][0]
-        try:
-            auth_idx = auth_tokens.index(pi_last)
-            other = auth_tokens[:auth_idx] + auth_tokens[auth_idx + 1 :]
-            if any(t.startswith(pi_first_initial) for t in other):
-                return True
-        except ValueError:
-            pass
-    return False
+    def score(name: str) -> int:
+        if not name:
+            return 0
+        pi_tok = tokenize(pi_name)
+        auth_tok = tokenize(name)
+        if not pi_tok or not auth_tok:
+            return 0
+        if pi_tok == auth_tok:
+            return 2
+        pi_last, auth_last = pi_tok[-1], auth_tok[-1]
+        if pi_last not in auth_tok:
+            return 0
+        if pi_tok[0][0] in (t[0] for t in auth_tok if t != pi_last):
+            return 1
+        return 0
+
+    names = [author.get("display_name")] + (author.get("display_name_alternatives") or [])
+    return max(score(n) for n in names if n)
+
+
+def _name_matches(pi_name: str, author_name: str) -> bool:
+    """Check if PI name matches author name (handles titles, initials, etc.)."""
+    return _name_match_strength(pi_name, {"display_name": author_name}) > 0
+
+
+def _pick_best_author(authors: list[dict], pi_name: str, institution: str) -> dict | None:
+    """
+    Disambiguate when multiple authors match. Rank by institution strength,
+    then name strength, then relevance_score, then cited_by_count.
+    """
+    def rank(a: dict) -> tuple | None:
+        inst = _institution_match_strength(a, institution)
+        name = _name_match_strength(pi_name, a)
+        if inst == 0 or name == 0:
+            return None
+        if not institution or not institution.strip():
+            inst = 2
+        return (inst, name, float(a.get("relevance_score") or 0), a.get("cited_by_count") or 0)
+
+    ranked = [(r, a) for a in authors if (r := rank(a)) is not None]
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return ranked[0][1]
 
 
 def _oa_params(params: dict | None = None) -> dict:
@@ -176,6 +222,55 @@ async def fetch_author_metrics(author_id: str) -> dict | None:
         return None
 
 
+async def _search_institution_id(institution_name: str) -> str | None:
+    """Search OpenAlex institutions by name; return best-matching ID (e.g. I123456)."""
+    if not institution_name or not institution_name.strip():
+        return None
+    url = f"{OA_API_BASE}/institutions"
+    params = {"search": institution_name[:200], "per_page": 3}
+    try:
+        resp = await _oa_get(url, params=params)
+    except Exception:
+        logger.debug("OpenAlex institution search failed for %r", institution_name[:50])
+        return None
+    if resp.status_code != 200:
+        return None
+    results = resp.json().get("results") or []
+    if not results:
+        return None
+    return _extract_author_id(results[0].get("id"))  # I123456 from https://openalex.org/I123
+
+
+async def _get_institution_id_cached(institution_name: str) -> str | None:
+    """Return OpenAlex institution ID, using cache to avoid repeated lookups."""
+    key = institution_name.strip() if institution_name else ""
+    if not key:
+        return None
+    if key not in _institution_id_cache:
+        _institution_id_cache[key] = await _search_institution_id(institution_name)
+    return _institution_id_cache[key]
+
+
+async def _search_authors_by_institution(
+    pi_name: str, institution_id: str
+) -> list[dict]:
+    """Search authors by name filtered by institution ID. Returns full author objects."""
+    url = f"{OA_API_BASE}/authors"
+    params = {
+        "search": pi_name,
+        "filter": f"last_known_institutions.id:{institution_id}",
+        "per_page": 15,
+    }
+    try:
+        resp = await _oa_get(url, params=params)
+    except Exception:
+        logger.debug("OpenAlex author+institution search failed for %s", pi_name)
+        return []
+    if resp.status_code != 200:
+        return []
+    return resp.json().get("results") or []
+
+
 async def _find_author_via_work_search(paper_title: str, pi_name: str) -> str | None:
     """Search works by title; return OpenAlex author ID if PI matches an author."""
     url = f"{OA_API_BASE}/works"
@@ -196,41 +291,83 @@ async def _find_author_via_work_search(paper_title: str, pi_name: str) -> str | 
     return None
 
 
+async def _resolve_author_via_papers(
+    rep_papers: list[str], pi_name: str
+) -> tuple[str | None, dict | None]:
+    """Known Paper strategy: search works by title, match author. Returns (author_id, metrics) or (None, None)."""
+    for paper_title in rep_papers[:5]:
+        author_id = await _find_author_via_work_search(paper_title, pi_name)
+        if author_id:
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+            metrics = await fetch_author_metrics(author_id)
+            if metrics and any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
+                return author_id, metrics
+        await asyncio.sleep(_RATE_LIMIT_DELAY)
+    return None, None
+
+
 async def _resolve_author_for_lab(lab_id: int, session: AsyncSession) -> tuple[str | None, dict | None]:
     """
-    Resolve OpenAlex author for a lab. Returns (author_id, metrics_dict) or (None, None).
+    Resolve OpenAlex author. (1) Institution-filtered search first; (2) if 0 or
+    multiple matches, fall back to Known Paper strategy; (3) fallback to name-only search.
     """
     result = await session.execute(select(LabProfileORM).where(LabProfileORM.id == lab_id))
     row = result.scalar_one_or_none()
     if not row:
         return None, None
 
+    pi_name = row.pi_name
+    institution = row.institution or ""
     rep_papers = getattr(row, "representative_papers", None) or []
-    if rep_papers:
-        for paper_title in rep_papers[:5]:
-            author_id = await _find_author_via_work_search(paper_title, row.pi_name)
-            if author_id:
-                await asyncio.sleep(_RATE_LIMIT_DELAY)
-                metrics = await fetch_author_metrics(author_id)
-                if metrics and any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
-                    return author_id, metrics
-            await asyncio.sleep(_RATE_LIMIT_DELAY)
 
-    url = f"{OA_API_BASE}/authors"
-    params = {"search": row.pi_name, "per_page": 10}
-    try:
-        resp = await _oa_get(url, params=params)
-    except Exception:
-        logger.exception("OpenAlex search failed for lab %d", lab_id)
-        return None, None
-    if resp.status_code != 200:
-        return None, None
-    authors = resp.json().get("results") or []
-    for author in authors:
-        if _author_matches_institution(author, row.institution or ""):
-            metrics = _oa_author_to_metrics(author)
-            if any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
-                return metrics.get("authorId"), metrics
+    # Step 1: Institution-first — search authors by name filtered by institution ID
+    authors: list[dict] = []
+    if institution.strip():
+        await asyncio.sleep(_RATE_LIMIT_DELAY)
+        inst_id = await _get_institution_id_cached(institution)
+        if inst_id:
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+            authors = await _search_authors_by_institution(pi_name, inst_id)
+
+    # If no institution filter worked, fall back to name-only search
+    if not authors:
+        url = f"{OA_API_BASE}/authors"
+        params = {"search": pi_name, "per_page": 15}
+        try:
+            resp = await _oa_get(url, params=params)
+            if resp.status_code == 200:
+                authors = resp.json().get("results") or []
+        except Exception:
+            logger.exception("OpenAlex search failed for lab %d", lab_id)
+
+    # Filter to those matching institution (client-side when we used name-only)
+    if institution.strip() and authors:
+        authors = [a for a in authors if _institution_match_strength(a, institution) > 0]
+
+    matching = [
+        a for a in authors
+        if _institution_match_strength(a, institution) > 0 and _name_match_strength(pi_name, a) > 0
+    ]
+    best = _pick_best_author(authors, pi_name, institution)
+
+    # Single clear match — use it
+    if best and len(matching) == 1:
+        metrics = _oa_author_to_metrics(best)
+        if any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
+            return metrics.get("authorId"), metrics
+
+    # Step 2: 0 or multiple matches — try Known Paper strategy
+    if rep_papers:
+        author_id, metrics = await _resolve_author_via_papers(rep_papers, pi_name)
+        if author_id and metrics:
+            return author_id, metrics
+
+    # Step 3: Use best from name/institution search even if ambiguous (no paper confirm)
+    if best:
+        metrics = _oa_author_to_metrics(best)
+        if any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
+            return metrics.get("authorId"), metrics
+
     return None, None
 
 
@@ -240,35 +377,56 @@ async def search_and_fetch_metrics(
     representative_papers: list[str] | None = None,
 ) -> dict | None:
     """
-    Search OpenAlex for author by name, filter by institution, return metrics.
-    When representative_papers is provided, tries Known Paper strategy first.
+    Search OpenAlex for author. Institution-filtered search first; if 0 or
+    multiple matches, fall back to Known Paper strategy.
     Returns metrics dict (paperCount, citationCount, hIndex, authorId) or None.
     """
-    if representative_papers:
-        for paper_title in representative_papers[:5]:
-            author_id = await _find_author_via_work_search(paper_title, pi_name)
-            if author_id:
-                await asyncio.sleep(_RATE_LIMIT_DELAY)
-                metrics = await fetch_author_metrics(author_id)
-                if metrics:
-                    return metrics
-            await asyncio.sleep(_RATE_LIMIT_DELAY)
+    rep_papers = representative_papers or []
 
-    url = f"{OA_API_BASE}/authors"
-    params = {"search": pi_name, "per_page": 10}
-    try:
-        resp = await _oa_get(url, params=params)
-    except Exception:
-        logger.exception("OpenAlex search failed for %s", pi_name)
-        return None
-    if resp.status_code != 200:
-        return None
-    authors = resp.json().get("results") or []
-    for author in authors:
-        if _author_matches_institution(author, institution):
-            metrics = _oa_author_to_metrics(author)
-            if any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
-                return metrics
+    # Step 1: Institution-first
+    authors: list[dict] = []
+    if institution and institution.strip():
+        await asyncio.sleep(_RATE_LIMIT_DELAY)
+        inst_id = await _get_institution_id_cached(institution)
+        if inst_id:
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+            authors = await _search_authors_by_institution(pi_name, inst_id)
+
+    if not authors:
+        url = f"{OA_API_BASE}/authors"
+        params = {"search": pi_name, "per_page": 15}
+        try:
+            resp = await _oa_get(url, params=params)
+            if resp.status_code == 200:
+                authors = resp.json().get("results") or []
+        except Exception:
+            logger.exception("OpenAlex search failed for %s", pi_name)
+            return None
+
+    if institution and institution.strip() and authors:
+        authors = [a for a in authors if _institution_match_strength(a, institution) > 0]
+
+    matching = [
+        a for a in authors
+        if _institution_match_strength(a, institution) > 0 and _name_match_strength(pi_name, a) > 0
+    ]
+    best = _pick_best_author(authors, pi_name, institution)
+
+    if best and len(matching) == 1:
+        metrics = _oa_author_to_metrics(best)
+        if any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
+            return metrics
+
+    # Step 2: Fallback to papers
+    if rep_papers:
+        author_id, metrics = await _resolve_author_via_papers(rep_papers, pi_name)
+        if author_id and metrics:
+            return metrics
+
+    if best:
+        metrics = _oa_author_to_metrics(best)
+        if any(metrics.get(k) is not None for k in ("paperCount", "citationCount", "hIndex")):
+            return metrics
     return None
 
 

@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { SearchSection } from "@/components/SearchSection";
+import { ActiveFilterPills } from "@/components/ActiveFilterPills";
 import { LabCard } from "@/components/LabCard";
 import { fetchLabs } from "@/lib/api";
 
@@ -9,6 +10,7 @@ interface PageProps {
     institution?: string;
     faculty?: string;
     keyword?: string;
+    topics?: string;
     min_publication_count?: string;
     min_citation_count?: string;
     min_h_index?: string;
@@ -43,17 +45,20 @@ export default async function HomePage({ searchParams }: PageProps) {
     institution,
     faculty,
     keyword,
+    topics: topicsParam,
     min_publication_count,
     min_citation_count,
     min_h_index,
     sort_by,
     sort_order,
   } = params;
+  const topic = topicsParam?.trim() ? topicsParam.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
   const filters = {
     q,
     institution,
     faculty,
     keyword,
+    topic,
     min_publication_count: min_publication_count ? parseInt(min_publication_count, 10) : undefined,
     min_citation_count: min_citation_count ? parseInt(min_citation_count, 10) : undefined,
     min_h_index: min_h_index ? parseInt(min_h_index, 10) : undefined,
@@ -109,10 +114,13 @@ export default async function HomePage({ searchParams }: PageProps) {
         </div>
       ) : (
         <>
-          <div className="flex items-baseline justify-between border-b border-slate-200 pb-4">
-            <h2 className="font-serif text-lg font-semibold text-navy">
-              {labs.length} lab{labs.length !== 1 ? "s" : ""} found
-            </h2>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200 pb-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-serif text-lg font-semibold text-navy">
+                {labs.length} lab{labs.length !== 1 ? "s" : ""} found
+              </h2>
+              <ActiveFilterPills />
+            </div>
           </div>
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {labs.map((lab) => (

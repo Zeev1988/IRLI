@@ -3,10 +3,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { UNIVERSITIES, UNIVERSITY_NAMES } from "@/lib/universities";
+import { fetchTopics } from "@/lib/api";
 
 const DEBOUNCE_MS = 400;
 
 type SortBy = "publication_count" | "citation_count" | "h_index" | "last_crawled" | "";
+
+function XIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="10"
+      height="10"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </svg>
+  );
+}
 
 function ChevronDown({ open }: { open: boolean }) {
   return (
@@ -28,9 +48,12 @@ function ChevronDown({ open }: { open: boolean }) {
 export function SearchFilters() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const q = searchParams.get("q") ?? "";
   const institution = searchParams.get("institution") ?? "";
   const faculty = searchParams.get("faculty") ?? "";
   const keyword = searchParams.get("keyword") ?? "";
+  const topicsParam = searchParams.get("topics") ?? "";
+  const topicsFromUrl = topicsParam ? topicsParam.split(",").map((t) => t.trim()).filter(Boolean) : [];
   const sortBy = (searchParams.get("sort_by") as SortBy) ?? "";
   const sortOrder = searchParams.get("sort_order") ?? "desc";
   const minPub = searchParams.get("min_publication_count") ?? "";
@@ -38,9 +61,12 @@ export function SearchFilters() {
   const minH = searchParams.get("min_h_index") ?? "";
 
   const [expanded, setExpanded] = useState(false);
+  const [topicsList, setTopicsList] = useState<string[]>([]);
+  const [topicSearch, setTopicSearch] = useState("");
   const [inst, setInst] = useState(institution);
   const [fac, setFac] = useState(faculty);
   const [kw, setKw] = useState(keyword);
+  const [selTopics, setSelTopics] = useState<string[]>(topicsFromUrl);
   const [sb, setSb] = useState(sortBy);
   const [so, setSo] = useState(sortOrder);
   const [mp, setMp] = useState(minPub);
@@ -49,9 +75,11 @@ export function SearchFilters() {
   const isSyncing = useRef(false);
 
   const activeCount = [
+    q.trim(),
     inst,
     fac,
     kw,
+    selTopics.length,
     sb,
     mp,
     mc,
@@ -63,12 +91,13 @@ export function SearchFilters() {
     setInst(institution);
     setFac(faculty);
     setKw(keyword);
+    setSelTopics(topicsFromUrl);
     setSb(sortBy);
     setSo(sortOrder);
     setMp(minPub);
     setMc(minCit);
     setMh(minH);
-  }, [institution, faculty, keyword, sortBy, sortOrder, minPub, minCit, minH]);
+  }, [institution, faculty, keyword, topicsParam, sortBy, sortOrder, minPub, minCit, minH]);
 
   const updateUrl = useCallback(
     (updates: Record<string, string | number | undefined>) => {
@@ -93,6 +122,7 @@ export function SearchFilters() {
         inst !== institution ||
         fac !== faculty ||
         kw !== keyword ||
+        selTopics.join(",") !== topicsFromUrl.join(",") ||
         sb !== sortBy ||
         so !== sortOrder ||
         mp !== minPub ||
@@ -106,6 +136,7 @@ export function SearchFilters() {
           institution: inst,
           faculty: fac,
           keyword: kw,
+          topics: selTopics.length ? selTopics.join(",") : undefined,
           sort_by: sb || undefined,
           sort_order: so,
           min_publication_count: minPubNum,
@@ -115,7 +146,7 @@ export function SearchFilters() {
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [inst, fac, kw, sb, so, mp, mc, mh]);
+  }, [inst, fac, kw, selTopics, sb, so, mp, mc, mh]);
 
   const handleInstitutionChange = (value: string) => {
     updateUrl({ institution: value, faculty: "" });
@@ -125,7 +156,63 @@ export function SearchFilters() {
     updateUrl({ institution: inst, faculty: value });
   };
 
+  const clearFilter = useCallback(
+    (filter: string, value?: string) => {
+      switch (filter) {
+        case "query":
+          updateUrl({ q: undefined });
+          break;
+        case "institution":
+          updateUrl({ institution: undefined, faculty: undefined });
+          break;
+        case "faculty":
+          updateUrl({ faculty: undefined });
+          break;
+        case "keyword":
+          updateUrl({ keyword: undefined });
+          break;
+        case "topic":
+          if (value)
+            updateUrl({ topics: selTopics.filter((t) => t !== value).join(",") || undefined });
+          break;
+        case "sort":
+          updateUrl({ sort_by: undefined, sort_order: undefined });
+          break;
+        case "min_pub":
+          updateUrl({ min_publication_count: undefined });
+          break;
+        case "min_cit":
+          updateUrl({ min_citation_count: undefined });
+          break;
+        case "min_h":
+          updateUrl({ min_h_index: undefined });
+          break;
+      }
+    },
+    [updateUrl, selTopics]
+  );
+
   const faculties = inst ? (UNIVERSITIES[inst] ?? []) : [];
+
+  useEffect(() => {
+    fetchTopics().then(setTopicsList).catch(() => setTopicsList([]));
+  }, []);
+
+  const toggleTopic = (t: string) => {
+    setSelTopics((prev) =>
+      prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]
+    );
+  };
+
+  const topicSearchLower = topicSearch.trim().toLowerCase();
+  const filteredTopics = topicSearchLower
+    ? topicsList.filter((t) => t.toLowerCase().includes(topicSearchLower))
+    : topicsList;
+  const selectedNotInFilter = selTopics.filter((t) => !filteredTopics.includes(t));
+  const topicsToShow = [
+    ...selectedNotInFilter,
+    ...filteredTopics.filter((t) => !selectedNotInFilter.includes(t)),
+  ];
 
   const selectClass =
     "rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-navy shadow-soft focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20";
@@ -134,19 +221,61 @@ export function SearchFilters() {
   const metricInputClass =
     "w-16 rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-navy shadow-soft focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20";
 
+  const filterPills = [
+    ...(q.trim() ? [{ key: "query", label: "query", value: q.trim() }] : []),
+    ...(inst ? [{ key: "institution", label: "institution", value: inst }] : []),
+    ...(fac ? [{ key: "faculty", label: "faculty", value: fac }] : []),
+    ...(kw ? [{ key: "keyword", label: "keyword", value: kw }] : []),
+    ...selTopics.map((t) => ({ key: `topic-${t}`, label: "topic", value: t })),
+    ...(sb
+      ? [
+          {
+            key: "sort",
+            label: "sort",
+            value: ({ publication_count: "pubs", citation_count: "cites", h_index: "h", last_crawled: "recent" }[sb] ?? sb) + (so === "asc" ? " ↑" : " ↓"),
+          },
+        ]
+      : []),
+    ...(mp ? [{ key: "min_pub", label: "min pubs", value: mp }] : []),
+    ...(mc ? [{ key: "min_cit", label: "min cites", value: mc }] : []),
+    ...(mh ? [{ key: "min_h", label: "min h", value: mh }] : []),
+  ];
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white/80 p-4 shadow-soft">
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded((e) => !e)}
-        className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-navy hover:bg-slate-50 transition-colors"
+        onKeyDown={(e) => e.key === "Enter" && setExpanded((x) => !x)}
+        className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-navy hover:bg-slate-50 transition-colors"
         aria-expanded={expanded}
       >
-        <span>
+        <span className="flex flex-wrap items-center gap-2">
           Filters {activeCount > 0 && `(${activeCount})`}
+          {filterPills.map(({ key, label, value }) => (
+            <span
+              key={key}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 rounded-full bg-accent/15 pl-2 pr-1 py-0.5 text-xs font-medium text-accent"
+            >
+              {label}: {value}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  clearFilter(key.startsWith("topic-") ? "topic" : key, key.startsWith("topic-") ? value : undefined);
+                }}
+                className="rounded-full p-0.5 hover:bg-accent/25 transition-colors"
+                aria-label={`Remove ${label} filter`}
+              >
+                <XIcon />
+              </button>
+            </span>
+          ))}
         </span>
         <ChevronDown open={expanded} />
-      </button>
+      </div>
       <div
         className={`grid overflow-hidden transition-all duration-300 ease-in-out ${
           expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
@@ -196,6 +325,39 @@ export function SearchFilters() {
                 )}
               </div>
             </div>
+
+            {/* Topics */}
+            {topicsList.length > 0 && (
+              <div>
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
+                  Topics
+                </h3>
+                <input
+                  type="text"
+                  placeholder="Search topics..."
+                  value={topicSearch}
+                  onChange={(e) => setTopicSearch(e.target.value)}
+                  className={`${inputClass} mb-2 w-full`}
+                  aria-label="Search topics"
+                />
+                <div className="max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
+                  {topicsToShow.map((t) => (
+                    <label
+                      key={t}
+                      className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-50"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selTopics.includes(t)}
+                        onChange={() => toggleTopic(t)}
+                        className="rounded border-slate-300 text-accent focus:ring-accent/20"
+                      />
+                      {t}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Search */}
             <div>

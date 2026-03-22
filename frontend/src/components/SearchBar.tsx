@@ -20,11 +20,8 @@ export function SearchBar() {
   const updateUrl = useCallback(
     (value: string) => {
       const params = new URLSearchParams(searchParams.toString());
-      if (value.trim()) {
-        params.set("q", value.trim());
-      } else {
-        params.delete("q");
-      }
+      if (value.trim()) params.set("q", value.trim());
+      else params.delete("q");
       router.push(`/?${params.toString()}`);
     },
     [router, searchParams]
@@ -50,7 +47,7 @@ export function SearchBar() {
       </span>
       <input
         type="search"
-        placeholder="Search labs (e.g. fMRI, machine learning, CRISPR)..."
+        placeholder="Search by name, topic, or institution..."
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && updateUrl(input)}

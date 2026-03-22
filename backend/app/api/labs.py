@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import Text, and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -64,17 +64,39 @@ def _orm_to_dict(row: LabProfileORM) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/labs/topics
+# ---------------------------------------------------------------------------
+@router.get(
+    "/topics",
+    summary="List distinct topics",
+    description="Returns sorted distinct values from lab keywords (used for topic filter dropdown).",
+)
+async def list_topics(session: AsyncSession = Depends(get_session)) -> list[str]:
+    stmt = text(
+        """
+        SELECT DISTINCT unnest(keywords) AS topic
+        FROM lab_profiles
+        WHERE keywords IS NOT NULL AND array_length(keywords, 1) > 0
+        ORDER BY topic
+        """
+    )
+    result = await session.execute(stmt)
+    return [row[0] for row in result.fetchall() if row[0]]
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/labs
 # ---------------------------------------------------------------------------
 def _build_filter_clauses(
     institution: str | None,
     faculty: str | None,
     keyword: str | None,
+    topics: list[str] | None,
     min_publication_count: int | None,
     min_citation_count: int | None,
     min_h_index: int | None,
 ) -> list:
-    """Build SQLAlchemy filter clauses for institution, faculty, keyword, metrics."""
+    """Build SQLAlchemy filter clauses for institution, faculty, keyword, topics, metrics."""
     clauses = []
     if institution and institution.strip():
         clauses.append(LabProfileORM.institution.ilike(f"%{institution.strip()}%"))
@@ -83,6 +105,17 @@ def _build_filter_clauses(
     if keyword and keyword.strip():
         pat = f"%{keyword.strip().lower()}%"
         clauses.append(func.lower(func.array_to_string(LabProfileORM.keywords, " ")).like(pat))
+    if topics:
+        topics_clean = [t.strip() for t in topics if t and str(t).strip()]
+        if topics_clean:
+            ph = ", ".join(f":topic_{i}" for i in range(len(topics_clean)))
+            clauses.append(
+                text(
+                    f"EXISTS (SELECT 1 FROM unnest(lab_profiles.keywords) kw WHERE kw IN ({ph}))"
+                ).bindparams(
+                    **{f"topic_{i}": t for i, t in enumerate(topics_clean)}
+                )
+            )
     if min_publication_count is not None:
         clauses.append(LabProfileORM.publication_count >= min_publication_count)
     if min_citation_count is not None:
@@ -121,6 +154,7 @@ async def list_labs(
     institution: str | None = Query(None, description="Filter by university/institution name"),
     faculty: str | None = Query(None, description="Filter by faculty/department"),
     keyword: str | None = Query(None, description="Filter by keyword (matches lab keywords)"),
+    topic: list[str] | None = Query(None, description="Filter by topics (exact match on keywords; multi-select)"),
     min_publication_count: int | None = Query(None, ge=0, description="Min publication count"),
     min_citation_count: int | None = Query(None, ge=0, description="Min citation count"),
     min_h_index: int | None = Query(None, ge=0, description="Min h-index"),
@@ -133,7 +167,7 @@ async def list_labs(
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     filter_clauses = _build_filter_clauses(
-        institution, faculty, keyword,
+        institution, faculty, keyword, topic or [],
         min_publication_count, min_citation_count, min_h_index,
     )
     base_filter = and_(*filter_clauses) if filter_clauses else True
@@ -161,11 +195,30 @@ async def list_labs(
         query_vec = await _embed_query(q)
         vec_literal = f"[{','.join(str(x) for x in query_vec)}]"
         q_clean = q.strip()
+        tokens = [t for t in q_clean.split() if len(t) >= 2]
 
         # Hybrid search: combine pgvector similarity + PostgreSQL full-text (ts_rank).
-        # Weights: 0.7 semantic, 0.3 keyword (BM25-style via ts_rank).
+        # Prioritize exact matches (pi_name, institution) over semantic similarity.
+        # For multi-word queries: require each token to match somewhere (name+institution fuzzy AND).
         filter_sql = ""
-        filter_params: dict[str, Any] = {"vec": vec_literal, "limit": limit, "q_fts": q_clean}
+        q_like = f"%{q_clean}%"
+        filter_params: dict[str, Any] = {"vec": vec_literal, "limit": limit, "q_fts": q_clean, "q_like": q_like}
+
+        if len(tokens) >= 2:
+            # Each token must match: ILIKE (exact) OR word_similarity (fuzzy, catches yosi->yossi).
+            match_expr = (
+                "lp.pi_name ILIKE :tok{i} OR lp.institution ILIKE :tok{i} OR lp.faculty ILIKE :tok{i} OR "
+                "array_to_string(lp.keywords, ' ') ILIKE :tok{i} OR "
+                "array_to_string(lp.technologies, ' ') ILIKE :tok{i} OR "
+                "array_to_string(lp.research_summary, ' ') ILIKE :tok{i} OR "
+                "word_similarity(:tok{i}_raw, lp.pi_name) > 0.3 OR "
+                "word_similarity(:tok{i}_raw, lp.institution) > 0.3 OR "
+                "word_similarity(:tok{i}_raw, lp.faculty) > 0.3"
+            )
+            for i, tok in enumerate(tokens):
+                filter_sql += f" AND ({match_expr.format(i=i)})"
+                filter_params[f"tok{i}"] = f"%{tok}%"
+                filter_params[f"tok{i}_raw"] = tok
         if institution and institution.strip():
             filter_sql += " AND institution ILIKE :inst"
             filter_params["inst"] = f"%{institution.strip()}%"
@@ -175,6 +228,13 @@ async def list_labs(
         if keyword and keyword.strip():
             filter_sql += " AND EXISTS (SELECT 1 FROM unnest(keywords) AS kw WHERE kw ILIKE :kw_pat)"
             filter_params["kw_pat"] = f"%{keyword.strip()}%"
+        if topic:
+            topics_clean = [t.strip() for t in topic if t and str(t).strip()]
+            if topics_clean:
+                ph = ", ".join(f":topic_{i}" for i in range(len(topics_clean)))
+                filter_sql += f" AND EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw IN ({ph}))"
+                for i, t in enumerate(topics_clean):
+                    filter_params[f"topic_{i}"] = t
         if min_publication_count is not None:
             filter_sql += " AND publication_count >= :min_pub"
             filter_params["min_pub"] = min_publication_count
@@ -192,13 +252,15 @@ async def list_labs(
                 SELECT lp.* FROM lab_profiles lp
                 CROSS JOIN q
                 WHERE 1=1 """ + filter_sql + """
-                ORDER BY (
-                    0.7 * coalesce(1 - (lp.embedding <=> :vec::vector) / 2, 0)
-                    + 0.3 * coalesce(
-                        ts_rank(lp.search_vector, q.query) / (1 + ts_rank(lp.search_vector, q.query)),
-                        0
-                    )
-                ) DESC NULLS LAST
+                ORDER BY
+                (CASE WHEN lp.pi_name ILIKE :q_like THEN 2
+                      WHEN lp.institution ILIKE :q_like THEN 1
+                      ELSE 0 END) DESC,
+                (0.7 * coalesce(1 - (lp.embedding <=> CAST(:vec AS vector)) / 2, 0)
+                 + 0.3 * coalesce(
+                     ts_rank(lp.search_vector, q.query) / (1 + ts_rank(lp.search_vector, q.query)),
+                     0
+                 )) DESC NULLS LAST
                 LIMIT :limit
                 """
             ),
