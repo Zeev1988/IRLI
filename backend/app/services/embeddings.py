@@ -17,8 +17,8 @@ os.environ["FASTEMBED_CACHE_PATH"] = str(CACHE_DIR)
 
 from fastembed import TextEmbedding
 
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 _fastembed_model: TextEmbedding | None = None
 
 def _get_model() -> TextEmbedding:

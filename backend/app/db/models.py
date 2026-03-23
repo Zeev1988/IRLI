@@ -28,7 +28,7 @@ class LabProfileORM(Base):
     lab_url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
 
     embedding: Mapped[list[float] | None] = mapped_column(
-    Vector(int(os.getenv("EMBEDDING_DIM", "1024"))), nullable=True
+    Vector(int(os.getenv("EMBEDDING_DIM", "384"))), nullable=True
     )
 
     publication_count: Mapped[int | None] = mapped_column(nullable=True)
